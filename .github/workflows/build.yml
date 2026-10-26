@@ -1,0 +1,49 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+        working-directory: .
+
+      - name: Build app (Release)
+        run: |
+          xcodebuild \
+            -project GoujiCardCounter.xcodeproj \
+            -scheme GoujiCardCounter \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Create IPA
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/GoujiCardCounter.app"
+          mkdir -p ipa/Payload
+          cp -R "$APP_PATH" ipa/Payload/
+          rm -rf "ipa/Payload/GoujiCardCounter.app/_CodeSignature"
+          rm -f "ipa/Payload/GoujiCardCounter.app/embedded.mobileprovision"
+          cd ipa && zip -r ../GoujiCardCounter.ipa . && cd ..
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoujiCardCounter.ipa
+          path: GoujiCardCounter.ipa
