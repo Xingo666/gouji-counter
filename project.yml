@@ -1,0 +1,50 @@
+name: GoujiCardCounter
+options:
+  bundleIdPrefix: com.goujicounter
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1" # iPhone only
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    ARCHS: "arm64"
+    VALID_ARCHS: "arm64"
+
+targets:
+  GoujiCardCounter:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goujicounter.app
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: GoujiCardCounter.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+    dependencies:
+      - target: BroadcastExtension
+        embed: true
+        copy:
+          destination: plugins
+
+  BroadcastExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BroadcastExtension
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goujicounter.app.BroadcastExtension
+        INFOPLIST_FILE: BroadcastExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: BroadcastExtension.entitlements
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: NO
