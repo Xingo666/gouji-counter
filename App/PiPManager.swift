@@ -268,7 +268,7 @@ class PiPManager: NSObject {
         )
         guard let format = formatDesc else { return nil }
 
-        let timing = CMSampleTimingInfo(
+        var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 10),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid
@@ -279,7 +279,7 @@ class PiPManager: NSObject {
             allocator: kCFAllocatorDefault,
             imageBuffer: buffer,
             formatDescription: format,
-            sampleTiming: timing,
+            sampleTiming: &timing,
             sampleBufferOut: &sampleBuffer
         )
         return sampleBuffer
