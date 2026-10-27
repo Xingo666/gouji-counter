@@ -9,8 +9,10 @@ class PiPManager: NSObject {
 
     private var pipController: AVPictureInPictureController?
     private var sampleBufferDisplayLayer: AVSampleBufferDisplayLayer?
-    private var displayLink: CADisplayLink?
-    private var lastFrameCount: Int = -1
+    private var renderTimer: Timer?
+    private var readinessObservation: NSKeyValueObservation?
+    private var starting = false
+    var onStateChange: ((String, Bool, Bool) -> Void)?
 
     /// 画中画渲染尺寸（小窗实际显示尺寸由系统决定，这里是渲染分辨率）
     private let renderSize = CGSize(width: 360, height: 480)
@@ -21,71 +23,86 @@ class PiPManager: NSObject {
 
     // MARK: - 启动/停止
 
-    func startPictureInPicture() {
+    func prepare(in preview: UIView) {
+        guard pipController == nil else { return }
         guard AVPictureInPictureController.isPictureInPictureSupported() else {
-            print("PiP not supported on this device")
+            onStateChange?("此设备不支持画中画", false, false)
             return
         }
-
-        // 创建显示层
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+            try session.setActive(true)
+        } catch {
+            onStateChange?("音频会话失败：\(error.localizedDescription)", false, false)
+            return
+        }
         let layer = AVSampleBufferDisplayLayer()
         layer.videoGravity = .resizeAspect
-        layer.bounds = CGRect(origin: .zero, size: renderSize)
-        layer.position = CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
-        self.sampleBufferDisplayLayer = layer
-
-        // 创建 PiP 控制器
+        layer.frame = preview.bounds
+        preview.layer.addSublayer(layer)
+        sampleBufferDisplayLayer = layer
+        var timebase: CMTimebase?
+        if CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault,
+            sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase) == noErr,
+            let timebase = timebase {
+            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(timebase, rate: 1)
+            layer.controlTimebase = timebase
+        }
         let controller = AVPictureInPictureController(
-            contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self)
-        )
+            contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self))
         controller.delegate = self
-        self.pipController = controller
+        controller.requiresLinearPlayback = true
+        pipController = controller
+        readinessObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.reportReadiness() }
+        }
+        // Feed the layer before requesting PiP, including when capture has not started.
+        renderTick()
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.renderTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        renderTimer = timer
+    }
 
-        // 启动 PiP
+    func resizePreview(to bounds: CGRect) {
+        sampleBufferDisplayLayer?.frame = bounds
+    }
+
+    private func reportReadiness() {
+        guard let controller = pipController,
+              !controller.isPictureInPictureActive, !starting else { return }
+        let ready = controller.isPictureInPicturePossible
+        onStateChange?(ready ? "已就绪，请点击启动" : "等待系统允许画中画", ready, false)
+    }
+
+    func startPictureInPicture() {
+        guard let controller = pipController, !starting,
+              !controller.isPictureInPictureActive else { return }
+        guard controller.isPictureInPicturePossible else {
+            reportReadiness()
+            return
+        }
+        starting = true
+        onStateChange?("正在启动", false, false)
         controller.startPictureInPicture()
     }
 
     func stopPictureInPicture() {
         pipController?.stopPictureInPicture()
-        displayLink?.invalidate()
-        displayLink = nil
-        pipController = nil
-        sampleBufferDisplayLayer = nil
     }
 
-    // MARK: - 渲染循环
-
-    private func startRenderLoop() {
-        displayLink?.invalidate()
-        let link = CADisplayLink(target: self, selector: #selector(renderTick))
-        link.preferredFrameRateRange = .init(minimum: 5, maximum: 15)
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-
-    @objc private func renderTick() {
+    private func renderTick() {
         guard let layer = sampleBufferDisplayLayer else { return }
-
-        // 从 App Group 读取最新数据
-        var frameCount = 0
-        var isBroadcasting = false
-        if let defaults = UserDefaults(suiteName: AppGroupConstants.appGroupID) {
-            frameCount = defaults.integer(forKey: AppGroupConstants.Keys.frameCount)
-            isBroadcasting = defaults.bool(forKey: AppGroupConstants.Keys.isBroadcasting)
-        }
-
-        // 只有数据变化时才重新渲染（省电）
-        guard frameCount != lastFrameCount else { return }
-        lastFrameCount = frameCount
-
-        // 生成一帧画面
-        if let sampleBuffer = renderCardCounterFrame(
-            frameCount: frameCount,
-            isBroadcasting: isBroadcasting
-        ) {
-            if layer.isReadyForMoreMediaData {
-                layer.enqueue(sampleBuffer)
-            }
+        if layer.status == .failed { layer.flush() }
+        guard layer.isReadyForMoreMediaData else { return }
+        let defaults = UserDefaults(suiteName: AppGroupConstants.appGroupID)
+        let frameCount = defaults?.integer(forKey: AppGroupConstants.Keys.frameCount) ?? 0
+        let isBroadcasting = defaults?.bool(forKey: AppGroupConstants.Keys.isBroadcasting) ?? false
+        if let sample = renderCardCounterFrame(frameCount: frameCount, isBroadcasting: isBroadcasting) {
+            layer.enqueue(sample)
         }
     }
 
@@ -117,7 +134,7 @@ class PiPManager: NSObject {
                 .font: UIFont.boldSystemFont(ofSize: 16),
                 .foregroundColor: UIColor.white
             ]
-            ("够级记牌器" as NSString).draw(
+            ("够级记牌器 · 示例数据" as NSString).draw(
                 at: CGPoint(x: 20, y: 20),
                 withAttributes: titleAttrs
             )
@@ -215,7 +232,7 @@ class PiPManager: NSObject {
                 .font: UIFont.systemFont(ofSize: 10),
                 .foregroundColor: UIColor.gray
             ]
-            let debugText = "帧: \(frameCount)"
+            let debugText = "采集帧: \(frameCount) | 刷新: \(Int(Date().timeIntervalSince1970) % 10000)"
             (debugText as NSString).draw(
                 at: CGPoint(x: 20, y: size.height - 24),
                 withAttributes: debugAttrs
@@ -294,19 +311,19 @@ extension PiPManager: AVPictureInPictureControllerDelegate {
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("PiP did start")
-        startRenderLoop()
+        starting = false
+        onStateChange?("已启动", false, true)
     }
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
                                     failedToStartPictureInPictureWithError error: Error) {
-        print("PiP failed to start: \(error)")
+        starting = false
+        onStateChange?("启动失败：\(error.localizedDescription)", pictureInPictureController.isPictureInPicturePossible, false)
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("PiP did stop")
-        displayLink?.invalidate()
-        displayLink = nil
+        starting = false
+        onStateChange?("已停止，可重新启动", pictureInPictureController.isPictureInPicturePossible, false)
     }
 }
 
@@ -320,7 +337,7 @@ extension PiPManager: AVPictureInPictureSampleBufferPlaybackDelegate {
 
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
         // 返回一个大范围，表示"持续播放"
-        return CMTimeRange(start: .zero, duration: CMTime(value: 3600 * 24, timescale: 1))
+        return CMTimeRange(start: .zero, duration: .positiveInfinity)
     }
 
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
